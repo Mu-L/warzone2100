@@ -33,6 +33,7 @@
 #include "stdinreader.h"
 #include "modding.h"
 #include "version.h"
+#include "mission.h"
 
 #include <string>
 #include <tuple>
@@ -418,6 +419,9 @@ void GameStoryLogger::logGameOver()
 
 	gameEndRealTime = std::chrono::system_clock::now();
 
+	gameFrames.push_back(genCurrentFrame());
+	lastRecordedGameFrameTime = gameTime;
+
 	if (outputModes.anyEnabled())
 	{
 		bool hitTimeout = (game.gameTimeLimitMinutes > 0) ? (gameTime >= (game.gameTimeLimitMinutes * 60 * 1000)) : false;
@@ -537,6 +541,7 @@ nlohmann::json GameStoryLogger::genEndOfGameReport(OutputKey key, OutputNaming n
 	report["game"] = buildGameDetailsOutputJSON(gameStartRealTime);
 	report["game"]["timeGameEnd"] = gameTime;
 	report["game"]["timeout"] = timeout;
+	report["game"]["cheated"] = Cheated;
 	report["endDate"] = std::chrono::duration_cast<std::chrono::milliseconds>(gameEndRealTime.time_since_epoch()).count();
 
 	return report;

@@ -1530,7 +1530,10 @@ void missionDroidUpdate(DROID *psDroid)
 	// NO ai update droid
 
 	// update the droids order
-	orderUpdateDroid(psDroid);
+	if (!orderUpdateDroid(psDroid))
+	{
+		ASSERT(false, "orderUpdateDroid returned false?");
+	}
 
 	// update the action of the droid
 	actionUpdateDroid(psDroid);
@@ -1812,6 +1815,13 @@ void missionMoveTransporterOffWorld(DROID *psTransporter)
 
 		//stop the droid moving - the moveUpdate happens AFTER the orderUpdate and can cause problems if the droid moves from one tile to another
 		moveReallyStopDroid(psTransporter);
+
+		// clear targets / action targets
+		setDroidTarget(psTransporter, nullptr);
+		for (int i = 0; i < MAX_WEAPONS; i++)
+		{
+			setDroidActionTarget(psTransporter, nullptr, i);
+		}
 
 		//if offworld mission, then add the timer
 		//if (mission.type == LDS_MKEEP || mission.type == LDS_MCLEAR)

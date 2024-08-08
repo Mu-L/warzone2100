@@ -83,6 +83,7 @@
 #include "screens/guidescreen.h"
 
 #include <list>
+#include <cmath>
 
 /// Assert for scripts that give useful backtraces and other info.
 #if defined(SCRIPT_ASSERT)
@@ -375,6 +376,10 @@ bool wzapi::orderDroidBuild(WZAPI_PARAMS(DROID* psDroid, int order, std::string 
 	SCRIPT_ASSERT(false, context, order == DORDER_BUILD, "Invalid order");
 	SCRIPT_ASSERT(false, context, psStats->id.compare("A0ADemolishStructure") != 0, "Cannot build demolition");
 
+	if (_direction.has_value() && std::isnan(_direction.value()))
+	{
+		_direction = 0.f; // avoid undefined behavior (nan is outside the range of representable values of type 'unsigned short')
+	}
 	uint16_t direction = static_cast<uint16_t>(DEG(_direction.value_or(0)));
 
 	DROID_ORDER_DATA *droidOrder = &psDroid->order;
@@ -406,6 +411,7 @@ bool wzapi::setAssemblyPoint(WZAPI_PARAMS(STRUCTURE *psStruct, int x, int y))
 //--
 bool wzapi::setSunPosition(WZAPI_PARAMS(float x, float y, float z))
 {
+	SCRIPT_ASSERT(false, context, !std::isnan(x) && !std::isnan(y) && !std::isnan(z), "Inputs must not be nan");
 	setTheSun(Vector3f(x, y, z));
 	return true;
 }
@@ -416,6 +422,10 @@ bool wzapi::setSunPosition(WZAPI_PARAMS(float x, float y, float z))
 //--
 bool wzapi::setSunIntensity(WZAPI_PARAMS(float ambient_r, float ambient_g, float ambient_b, float diffuse_r, float diffuse_g, float diffuse_b, float specular_r, float specular_g, float specular_b))
 {
+	SCRIPT_ASSERT(false, context, !std::isnan(ambient_r) && !std::isnan(ambient_g) && !std::isnan(ambient_b), "ambient inputs must not be nan");
+	SCRIPT_ASSERT(false, context, !std::isnan(diffuse_r) && !std::isnan(diffuse_g) && !std::isnan(diffuse_b), "diffuse inputs must not be nan");
+	SCRIPT_ASSERT(false, context, !std::isnan(specular_r) && !std::isnan(specular_g) && !std::isnan(specular_b), "specular inputs must not be nan");
+
 	float ambient[4];
 	float diffuse[4];
 	float specular[4];
@@ -465,6 +475,9 @@ bool wzapi::setWeather(WZAPI_PARAMS(int weatherType))
 //--
 bool wzapi::setSky(WZAPI_PARAMS(std::string textureFilename, float windSpeed, float scale))
 {
+	SCRIPT_ASSERT(false, context, !std::isnan(windSpeed), "windSpeed must not be nan");
+	SCRIPT_ASSERT(false, context, !std::isnan(scale), "scale must not be nan");
+
 	setSkyBox(textureFilename.c_str(), windSpeed, scale);
 	return true; // TODO: modify setSkyBox to return bool, success / failure
 }
@@ -475,6 +488,9 @@ bool wzapi::setSky(WZAPI_PARAMS(std::string textureFilename, float windSpeed, fl
 //--
 bool wzapi::cameraSlide(WZAPI_PARAMS(float x, float y))
 {
+	SCRIPT_ASSERT(false, context, !std::isnan(x), "x must not be nan");
+	SCRIPT_ASSERT(false, context, !std::isnan(y), "y must not be nan");
+
 	requestRadarTrack(static_cast<SDWORD>(x), static_cast<SDWORD>(y));
 	return true;
 }
@@ -485,6 +501,9 @@ bool wzapi::cameraSlide(WZAPI_PARAMS(float x, float y))
 //--
 bool wzapi::cameraZoom(WZAPI_PARAMS(float viewDistance, float speed))
 {
+	SCRIPT_ASSERT(false, context, !std::isnan(viewDistance), "viewDistance must not be nan");
+	SCRIPT_ASSERT(false, context, !std::isnan(speed), "speed must not be nan");
+
 	animateToViewDistance(viewDistance, speed);
 	return true;
 }
@@ -1237,6 +1256,11 @@ wzapi::researchResults wzapi::enumResearch(WZAPI_NO_PARAMS)
 //--
 std::vector<const BASE_OBJECT *> wzapi::enumRange(WZAPI_PARAMS(int _x, int _y, int _range, optional<int> _playerFilter, optional<bool> _seen))
 {
+	_x = std::max<int>(_x, 0);
+	_y = std::max<int>(_y, 0);
+	_x = std::min<int>(_x, mapWidth);
+	_y = std::min<int>(_y, mapHeight);
+
 	int player = context.player();
 	int x = world_coord(_x);
 	int y = world_coord(_y);
@@ -2117,6 +2141,11 @@ std::vector<scr_position> wzapi::getDroidPath(WZAPI_PARAMS(const DROID *psDroid)
 //--
 bool wzapi::addBeacon(WZAPI_PARAMS(int _x, int _y, int playerFilter, optional<std::string> _message))
 {
+	SCRIPT_ASSERT(false, context, _x >= 0, "Beacon x value %d is less than zero", _x);
+	SCRIPT_ASSERT(false, context, _y >= 0, "Beacon y value %d is less than zero", _y);
+	SCRIPT_ASSERT(false, context, _x <= mapWidth, "Beacon x value %d is greater than mapWidth %d", _x, (int)mapWidth);
+	SCRIPT_ASSERT(false, context, _y <= mapHeight, "Beacon y value %d is greater than mapHeight %d", _y, (int)mapHeight);
+
 	int x = world_coord(_x);
 	int y = world_coord(_y);
 
@@ -2345,7 +2374,7 @@ bool wzapi::isSpectator(WZAPI_PARAMS(int player))
 nlohmann::json wzapi::getWeaponInfo(WZAPI_PARAMS(std::string weaponName)) WZAPI_DEPRECATED
 {
 	int weaponIndex = getCompFromName(COMP_WEAPON, WzString::fromUtf8(weaponName));
-	SCRIPT_ASSERT(nlohmann::json(), context, weaponIndex >= 0, "No such weapon: %s", weaponName.c_str());
+	SCRIPT_ASSERT(nlohmann::json(), context, weaponIndex >= 0 && weaponIndex < asWeaponStats.size(), "No such weapon: %s", weaponName.c_str());
 	WEAPON_STATS *psStats = &asWeaponStats[weaponIndex];
 	nlohmann::json result = nlohmann::json::object();
 	result["id"] = weaponName;
@@ -2365,6 +2394,10 @@ nlohmann::json wzapi::getWeaponInfo(WZAPI_PARAMS(std::string weaponName)) WZAPI_
 //--
 bool wzapi::centreView(WZAPI_PARAMS(int x, int y))
 {
+	SCRIPT_ASSERT(false, context, x >= 0, "x value %d is less than zero", x);
+	SCRIPT_ASSERT(false, context, y >= 0, "y value %d is less than zero", y);
+	SCRIPT_ASSERT(false, context, x <= mapWidth, "x value %d is greater than mapWidth %d", x, (int)mapWidth);
+	SCRIPT_ASSERT(false, context, y <= mapHeight, "y value %d is greater than mapHeight %d", y, (int)mapHeight);
 	setViewPos(x, y, false);
 	return true;
 }
@@ -3168,13 +3201,12 @@ int wzapi::countDroid(WZAPI_PARAMS(optional<int> _droidType, optional<int> _play
 //--
 wzapi::no_return_value wzapi::loadLevel(WZAPI_PARAMS(std::string levelName))
 {
-	sstrcpy(aLevelName, levelName.c_str());
-
 	// Find the level dataset
 	LEVEL_DATASET *psNewLevel = levFindDataSet(levelName.c_str());
 	SCRIPT_ASSERT({}, context, psNewLevel, "Could not find level data for %s", levelName.c_str());
 
 	// Get the mission rolling...
+	sstrcpy(aLevelName, levelName.c_str());
 	prevMissionType = mission.type;
 	nextMissionType = psNewLevel->type;
 	loopMissionState = LMS_CLEAROBJECTS;
@@ -3249,6 +3281,7 @@ bool wzapi::donateObject(WZAPI_PARAMS(BASE_OBJECT *psObject, int player))
 bool wzapi::donatePower(WZAPI_PARAMS(int amount, int player))
 {
 	int from = context.player();
+	SCRIPT_ASSERT_PLAYER(false, context, player);
 	giftPower(from, player, amount, true);
 	return true;
 }

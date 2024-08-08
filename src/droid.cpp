@@ -833,7 +833,8 @@ void droidUpdate(DROID *psDroid)
 	if (psDroid->repairGroup != UBYTE_MAX &&
 		psDroid->order.type != DORDER_RTR &&
 		psDroid->order.type != DORDER_RTR_SPECIFIED &&
-		psDroid->order.type != DORDER_RTB)
+		psDroid->order.type != DORDER_RTB &&
+		secondaryGetState(psDroid, DSO_REPAIR_LEVEL) == DSS_REPLEV_NEVER)
 	{
 		droidWasFullyRepairedBase(psDroid);
 	}
@@ -842,7 +843,10 @@ void droidUpdate(DROID *psDroid)
 	aiUpdateDroid(psDroid);
 
 	// Update the droids order.
-	orderUpdateDroid(psDroid);
+	if (!orderUpdateDroid(psDroid))
+	{
+		return; // skip further processing - droid was moved to a different list!
+	}
 
 	// update the action of the droid
 	actionUpdateDroid(psDroid);
@@ -1884,7 +1888,7 @@ void templateSetParts(const DROID *psDroid, DROID_TEMPLATE *psTemplate)
 }
 
 /* Make all the droids for a certain player a member of a specific group */
-/* If a structure is selected, set its group to which droids will be automatically assigned */
+/* If no droids are selected: If a structure is selected, set its group to which droids will be automatically assigned */
 void assignObjectToGroup(UDWORD	playerNumber, UDWORD groupNumber, bool clearGroup)
 {
 	bool	bAtLeastOne = false;
@@ -1894,24 +1898,6 @@ void assignObjectToGroup(UDWORD	playerNumber, UDWORD groupNumber, bool clearGrou
 
 	if (groupNumber < UBYTE_MAX)
 	{
-		/* Run through all the structures */
-		for (STRUCTURE *psStruct : apsStructLists[playerNumber])
-		{
-			if (psStruct->selected && psStruct->isFactory())
-			{
-				if (psStruct->productToGroup != (UBYTE)groupNumber)
-				{
-					psStruct->productToGroup = (UBYTE)groupNumber;
-				}
-				else
-				{
-					// To make it possible to clear factory group assignment via "toggle" behavior of assigning a factory to the same group it's already assigned
-					psStruct->productToGroup = UBYTE_MAX;
-				}
-				return;
-			}
-		}
-
 		/* Run through all the droids */
 		for (DROID* psDroid : apsDroidLists[playerNumber])
 		{
@@ -1951,6 +1937,27 @@ void assignObjectToGroup(UDWORD	playerNumber, UDWORD groupNumber, bool clearGrou
 			newSelectedGroup = groupNumber;
 		}
 		intGroupsChanged(newSelectedGroup);
+	}
+	if (!bAtLeastOne && groupNumber < UBYTE_MAX)
+	{
+		/* If no droids were selected to be added to the group, check if a factory is selected */
+		/* Run through all the structures */
+		for (STRUCTURE *psStruct : apsStructLists[playerNumber])
+		{
+			if (psStruct->selected && psStruct->isFactory())
+			{
+				if (psStruct->productToGroup != (UBYTE)groupNumber)
+				{
+					psStruct->productToGroup = (UBYTE)groupNumber;
+				}
+				else
+				{
+					// To make it possible to clear factory group assignment via "toggle" behavior of assigning a factory to the same group it's already assigned
+					psStruct->productToGroup = UBYTE_MAX;
+				}
+				return;
+			}
+		}
 	}
 }
 
@@ -2898,6 +2905,18 @@ bool DROID::isFlying() const
 {
 	return getPropulsionStats()->propulsionType == PROPULSION_TYPE_LIFT
 		   && (sMove.Status != MOVEINACTIVE || isTransporter());
+}
+
+// true if a droid is retreating for repair
+bool DROID::isRetreatingForRepair() const
+{
+	return order.type == DORDER_RTR || order.type == DORDER_RTR_SPECIFIED;
+}
+
+// true if a droid is returning to base
+bool DROID::isReturningToBase() const
+{
+	return order.type == DORDER_RTB;
 }
 
 /* returns true if it's a VTOL weapon droid which has completed all runs */
