@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <string>
 #include <system_error>
@@ -139,7 +140,7 @@ public:
 	/// </summary>
 	/// <param name="rawByteCount">Raw count of bytes (after compression) as written
 	/// to the submission queue by the flush operation.</param>
-	void flush(size_t* rawByteCount);
+	net::result<void> flush(size_t* rawByteCount);
 	/// <summary>
 	/// Enables compression for the current socket.
 	///
@@ -216,6 +217,8 @@ public:
 	{
 		writeErrorCode_ = std::move(ec);
 	}
+
+	virtual void setConnectedTimeout(std::chrono::milliseconds timeout) = 0;
 
 protected:
 
