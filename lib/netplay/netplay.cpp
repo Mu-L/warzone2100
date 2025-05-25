@@ -116,6 +116,7 @@ static void NETplayerLeaving(UDWORD player, bool quietSocketClose = false);		// 
 static void NETplayerDropped(UDWORD player);		// Broadcast NET_PLAYER_DROPPED & cleanup
 static void NETallowJoining();
 static void NETfixPlayerCount();
+static void NETclientHandleHostDisconnected();
 /*
  * Network globals, these are part of the new network API
  */
@@ -950,11 +951,16 @@ bool NETplayerHasConnection(uint32_t index)
  * @note Connection dropped. Handle it gracefully.
  * \param index
  */
-static void NETplayerClientsDisconnect(std::set<uint32_t> indexes)
+static void NETplayerClientsDisconnect(const std::set<uint32_t>& indexes)
 {
 	if (!NetPlay.isHost)
 	{
 		ASSERT(false, "Host only routine detected for client!");
+		return;
+	}
+
+	if (indexes.empty())
+	{
 		return;
 	}
 
@@ -1495,10 +1501,22 @@ static bool NETrecvGAMESTRUCT(IClientConnection& sock, GAMESTRUCT *ourgamestruct
 	return true;
 }
 
+static PortMappingInternetProtocol getPreferredPortMappingProtocol(WzConnectionProvider& connProvider)
+{
+	// We currently support creating only IPV4 port mappings.
+	constexpr auto IPV4_PROTOCOL_KINDS = static_cast<PortMappingInternetProtocolMask>(PortMappingInternetProtocol::TCP_IPV4) | static_cast<PortMappingInternetProtocolMask>(PortMappingInternetProtocol::UDP_IPV4);
+
+	const auto supportedProtocolTypes = connProvider.portMappingProtocolTypes();
+	const PortMappingInternetProtocol res = static_cast<PortMappingInternetProtocol>(supportedProtocolTypes & IPV4_PROTOCOL_KINDS);
+	ASSERT(res == PortMappingInternetProtocol::TCP_IPV4 || res == PortMappingInternetProtocol::UDP_IPV4, "Unexpected port mapping protocol");
+	return res;
+}
+
 void NETaddRedirects()
 {
+	ASSERT_OR_RETURN(, activeConnProvider != nullptr, "No active connection provider");
 	auto& pmm = PortMappingManager::instance();
-	ipv4MappingRequest = pmm.create_port_mapping(gameserver_port, PortMappingInternetProtocol::IPV4);
+	ipv4MappingRequest = pmm.create_port_mapping(gameserver_port, getPreferredPortMappingProtocol(*activeConnProvider));
 	if (!ipv4MappingRequest)
 	{
 		debug(LOG_NET, "Failed to create port mapping!");
@@ -1882,13 +1900,8 @@ bool NETsend(NETQUEUE queue, NetMessage const *message)
 				// Write error, most likely host disconnect.
 				debug(LOG_ERROR, "Failed to send message: %s", writeErrMsg.c_str());
 				debug(LOG_ERROR, "Host connection was broken, socket %p.", static_cast<void *>(bsocket));
-				NETlogEntry("write error--client disconnect.", SYNC_FLAG, player);
-				client_socket_set->remove(bsocket);            // mark it invalid
-				bsocket->close();
-				bsocket = nullptr;
-				NetPlay.players[NetPlay.hostPlayer].heartbeat = false;	// mark host as dead
-				//Game is pretty much over --should just end everything when HOST dies.
-				NetPlay.isHostAlive = false;
+				NETlogEntry("write error--client disconnect.", SYNC_FLAG, NetPlay.hostPlayer);
+				NETclientHandleHostDisconnected();
 			}
 
 			return res == rawLen;
@@ -1908,6 +1921,43 @@ bool NETsend(NETQUEUE queue, NetMessage const *message)
 	return false;
 }
 
+static void NETcloseTempSocket(unsigned int i)
+{
+	std::string rIP = tmp_socket[i]->textAddress();
+	tmp_socket_set->remove(tmp_socket[i]);
+	tmp_socket[i]->close();
+	tmp_socket[i] = nullptr;
+	tmp_connectState[i].reset();
+	auto it = tmp_pendingIPs.find(rIP);
+	if (it != tmp_pendingIPs.end())
+	{
+		if (it->second > 1)
+		{
+			it->second--;
+		}
+		else
+		{
+			tmp_pendingIPs.erase(it);
+		}
+	}
+}
+
+static void NETclientHandleHostDisconnected()
+{
+	ASSERT_OR_RETURN(, !NetPlay.isHost, "Should only be called by clients!");
+	ASSERT_OR_RETURN(, bsocket != nullptr, "bsocket is already null?");
+	if (client_socket_set)
+	{
+		client_socket_set->remove(bsocket); // mark it invalid
+	}
+	bsocket->close();
+	bsocket = nullptr;
+	ASSERT(NetPlay.hostPlayer < NetPlay.players.size(), "Invalid NetPlay.hostPlayer: %" PRIu32, NetPlay.hostPlayer);
+	NetPlay.players[NetPlay.hostPlayer].heartbeat = false;	// mark host as dead
+	//Game is pretty much over --should just end everything when HOST dies.
+	NetPlay.isHostAlive = false;
+}
+
 void NETflush()
 {
 	if (!NetPlay.bComms)
@@ -1917,24 +1967,49 @@ void NETflush()
 
 	NETflushGameQueues();
 
-	size_t compressedRawLen;
+	size_t compressedRawLen = 0;
 	if (NetPlay.isHost)
 	{
+		// Preliminary check to see if any player sockets are still valid.
+		std::set<uint32_t> invalidPlayerIndices;
+		for (int player = 0; player < MAX_CONNECTED_PLAYERS; ++player)
+		{
+			if (connected_bsocket[player] != nullptr && !connected_bsocket[player]->isValid())
+			{
+				invalidPlayerIndices.emplace(player);
+			}
+		}
+		// Gracefully handle disconnected players.
+		NETplayerClientsDisconnect(invalidPlayerIndices);
+
 		for (int player = 0; player < MAX_CONNECTED_PLAYERS; ++player)
 		{
 			// We are the host, send directly to player.
-			if (connected_bsocket[player] != nullptr)
+			if (!invalidPlayerIndices.count(player) && connected_bsocket[player] != nullptr)
 			{
-				connected_bsocket[player]->flush(&compressedRawLen);
+				if (!connected_bsocket[player]->flush(&compressedRawLen).has_value())
+				{
+					invalidPlayerIndices.emplace(player);
+					continue;
+				}
 				nStats.rawBytes.sent += compressedRawLen;
 			}
 		}
+
+		// Once again, if any connected client sockets had problems during flush(), consider them disconnected and handle appropriately.
+		NETplayerClientsDisconnect(invalidPlayerIndices);
+
 		for (int player = 0; player < MAX_TMP_SOCKETS; ++player)
 		{
 			// We are the host, send directly to player.
 			if (tmp_socket[player] != nullptr)
 			{
-				tmp_socket[player]->flush(&compressedRawLen);
+				if (!tmp_socket[player]->isValid() || !tmp_socket[player]->flush(&compressedRawLen).has_value())
+				{
+					debug(LOG_NET, "Failed to flush temporary socket for player slot %d", player);
+					NETcloseTempSocket(player);
+					continue;
+				}
 				nStats.rawBytes.sent += compressedRawLen;
 			}
 		}
@@ -1943,7 +2018,13 @@ void NETflush()
 	{
 		if (bsocket != nullptr)
 		{
-			bsocket->flush(&compressedRawLen);
+			if (!bsocket->isValid() || !bsocket->flush(&compressedRawLen).has_value())
+			{
+				debug(LOG_INFO, "Failed to flush socket for host. Closing connection.");
+				NETlogEntry("flush error--client disconnect.", SYNC_FLAG, NetPlay.hostPlayer);
+				NETclientHandleHostDisconnected();
+				return;
+			}
 			nStats.rawBytes.sent += compressedRawLen;
 		}
 	}
@@ -2173,7 +2254,7 @@ bool NETmovePlayerToSpectatorOnlySlot(uint32_t playerIdx, bool hostOverride /*= 
 		std::string playerVerifiedStatus = (ingame.VerifiedIdentity[newSpecIdx]) ? "V" : "?";
 		std::string playerName = getPlayerName(newSpecIdx);
 		std::string playerNameB64 = base64Encode(std::vector<unsigned char>(playerName.begin(), playerName.end()));
-		wz_command_interface_output("WZEVENT: movedPlayerToSpec: %" PRIu32 " -> %" PRIu32 " %s %s %s %s %s\n", playerIdx, newSpecIdx, playerPublicKeyB64.c_str(), playerIdentityHash.c_str(), playerVerifiedStatus.c_str(), playerNameB64.c_str(), NetPlay.players[newSpecIdx].IPtextAddress);
+		wz_command_interface_output("WZEVENT: movedPlayerToSpec: %" PRIu32 " -> %" PRIu32 " %s %s %s %s %s %s\n", playerIdx, newSpecIdx, playerPublicKeyB64.c_str(), playerIdentityHash.c_str(), playerVerifiedStatus.c_str(), playerNameB64.c_str(), NetPlay.players[newSpecIdx].IPtextAddress, hostOverride?"host":"user");
 	}
 
 	// Broadcast the swapped player info
@@ -2894,11 +2975,14 @@ static void NETcheckPlayers()
 // We should not block here.
 bool NETrecvNet(NETQUEUE *queue, uint8_t *type)
 {
-	uint32_t current;
-
 	if (!NetPlay.bComms)
 	{
 		return false;
+	}
+
+	if (activeConnProvider)
+	{
+		activeConnProvider->processConnectionStateChanges();
 	}
 
 	if (NetPlay.isHost)
@@ -2915,6 +2999,8 @@ bool NETrecvNet(NETQUEUE *queue, uint8_t *type)
 	{
 		goto checkMessages;
 	}
+
+	uint32_t current;
 
 	for (current = 0; current < MAX_CONNECTED_PLAYERS; ++current)
 	{
@@ -3856,27 +3942,6 @@ static bool quickRejectConnection(const std::string& ip)
 	}
 
 	return false;
-}
-
-static void NETcloseTempSocket(unsigned int i)
-{
-	std::string rIP = tmp_socket[i]->textAddress();
-	tmp_socket_set->remove(tmp_socket[i]);
-	tmp_socket[i]->close();
-	tmp_socket[i] = nullptr;
-	tmp_connectState[i].reset();
-	auto it = tmp_pendingIPs.find(rIP);
-	if (it != tmp_pendingIPs.end())
-	{
-		if (it->second > 1)
-		{
-			it->second--;
-		}
-		else
-		{
-			tmp_pendingIPs.erase(it);
-		}
-	}
 }
 
 static void NEThostPromoteTempSocketToPermanentPlayerConnection(unsigned int tempSocketIdx, uint8_t index)
@@ -5343,3 +5408,25 @@ void NETacceptIncomingConnections()
 		tmp_socket[i]->useNagleAlgorithm(false);
 	}
 }
+
+void NETadjustConnectedTimeoutForClients()
+{
+	constexpr std::chrono::milliseconds IN_GAME_CONNECTED_TIMEOUT{ 60000 };
+
+	if (NetPlay.isHost)
+	{
+		for (size_t i = 0; i < MAX_CONNECTED_PLAYERS; ++i)
+		{
+			if (connected_bsocket[i] != nullptr)
+			{
+				connected_bsocket[i]->setConnectedTimeout(IN_GAME_CONNECTED_TIMEOUT);
+			}
+		}
+		return;
+	}
+	if (bsocket)
+	{
+		bsocket->setConnectedTimeout(IN_GAME_CONNECTED_TIMEOUT);
+	}
+}
+

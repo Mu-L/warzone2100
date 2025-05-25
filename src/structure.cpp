@@ -2975,6 +2975,7 @@ RepairState aiUpdateRepair_handleEvents(STRUCTURE &station, RepairEvents ev, DRO
 	if (bMultiPlayer && psStructure->resistance < (int)structureResistance(psStructure->pStructureType, psStructure->player))
 	{
 		objTrace(psStructure->id, "Resistance too low for repair");
+		droidRepairStopped(castDroid(psRepairFac->psObj), &station);
 		psRepairFac->psObj = nullptr;
 		return RepairState::Idle;
 	}
@@ -2988,6 +2989,7 @@ RepairState aiUpdateRepair_handleEvents(STRUCTURE &station, RepairEvents ev, DRO
 	{
 		ASSERT(found != nullptr, "Bug! found droid, but it was null?");
 		psRepairFac->psObj = found;
+		droidRepairStarted(found, &station);
 		return RepairState::Repairing;
 	};
 	case RepairEvents::UnitReachedMaxHP:
@@ -2998,6 +3000,7 @@ RepairState aiUpdateRepair_handleEvents(STRUCTURE &station, RepairEvents ev, DRO
 		psDroid->body = psDroid->originalBody;
 		// if completely repaired reset order
 		objTrace(psDroid->id, "was fully repaired by RF");
+		droidRepairStopped(psDroid, &station);
 		droidWasFullyRepaired(psDroid, psRepairFac);
 		// only call "secondarySetState" *after* triggering "droidWasFullyRepaired"
 		// because in some cases calling it would modify primary order
@@ -3009,11 +3012,13 @@ RepairState aiUpdateRepair_handleEvents(STRUCTURE &station, RepairEvents ev, DRO
 	{
 		DROID *psDroid = (DROID*) psRepairFac->psObj;
 		syncDebugDroid(psDroid, '-');
+		droidRepairStopped(psDroid, &station);
 		psRepairFac->psObj = nullptr;
 		return RepairState::Idle;
 	};
 	case RepairEvents::UnitMovedAway:
 	{
+		droidRepairStopped(castDroid(psRepairFac->psObj), &station);
 		psRepairFac->psObj = nullptr;
 		return RepairState::Idle;
 	};
@@ -3651,11 +3656,11 @@ void _syncDebugStructure(const char *function, STRUCTURE const *psStruct, char c
 	int ref = 0;
 	int refChr = ' ';
 
-	// Print what the structure is producing, too.
+	// Print what the structure is producing (or repairing), too.
 	switch (psStruct->pStructureType->type)
 	{
 	case REF_RESEARCH:
-		if (psStruct->pFunctionality->researchFacility.psSubject != nullptr)
+		if (psStruct->pFunctionality && psStruct->pFunctionality->researchFacility.psSubject != nullptr)
 		{
 			ref = psStruct->pFunctionality->researchFacility.psSubject->ref;
 			refChr = 'r';
@@ -3664,10 +3669,17 @@ void _syncDebugStructure(const char *function, STRUCTURE const *psStruct, char c
 	case REF_FACTORY:
 	case REF_CYBORG_FACTORY:
 	case REF_VTOL_FACTORY:
-		if (psStruct->pFunctionality->factory.psSubject != nullptr)
+		if (psStruct->pFunctionality && psStruct->pFunctionality->factory.psSubject != nullptr)
 		{
 			ref = psStruct->pFunctionality->factory.psSubject->multiPlayerID;
 			refChr = 'p';
+		}
+		break;
+	case REF_REPAIR_FACILITY:
+		if (psStruct->pFunctionality && psStruct->pFunctionality->repairFacility.psObj != nullptr)
+		{
+			ref = (int)psStruct->pFunctionality->repairFacility.psObj->id;
+			refChr = '+';
 		}
 		break;
 	default:
@@ -4581,6 +4593,17 @@ bool removeStruct(STRUCTURE *psDel, bool bDestroy)
 		{
 			//cancel the topic
 			cancelResearch(psDel, ModeImmediate);
+		}
+	}
+
+	if (psDel->pStructureType->type == REF_REPAIR_FACILITY)
+	{
+		if (psDel->pFunctionality && psDel->pFunctionality->repairFacility.state == RepairState::Repairing)
+		{
+			if (psDel->pFunctionality->repairFacility.psObj != nullptr)
+			{
+				droidRepairStopped(castDroid(psDel->pFunctionality->repairFacility.psObj), psDel);
+			}
 		}
 	}
 
